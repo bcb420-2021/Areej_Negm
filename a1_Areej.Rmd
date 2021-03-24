@@ -1,0 +1,318 @@
+---
+title: 'BCB420: Assignment 1- Data Selection & Processing'
+author: "Areej Negm"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+
+```{r}
+# Packages required
+if (! requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+if (! requireNamespace("Biobase", quietly = TRUE)) {
+  BiocManager::install("Biobase")
+}
+if (! requireNamespace("edgeR", quietly = TRUE)) {
+  BiocManager::install("edgeR")
+}
+if (!requireNamespace("biomaRt", quietly = TRUE)) {
+   BiocManager::install("biomaRt")
+}
+if (! requireNamespace("GEOquery", quietly = TRUE)) {
+  BiocManager::install("GEOquery")
+}
+if (!requireNamespace("GEOmetadb", quietly = TRUE)){
+  BiocManager::install("GEOmetadb")
+}
+
+library(BiocManager)
+library(Biobase)
+library(edgeR)
+library(biomaRt)
+library(GEOquery)
+library(GEOmetadb)
+
+
+```
+
+# Selecting an Expression Dataset
+
+The expression data set I chose is [GSE157852](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE157852) Human Pluripotent Stem Cell-Derived Neural Cells and Brain Organoids Reveal SARS-CoV-2 Neurotropism Predominates in Choroid Plexus Epithelium
+
+
+# Overview of Data
+First, I need to download my chosen dataset 
+```{r}
+gse <- getGEO("GSE157852",GSEMatrix=FALSE)
+
+if (! exists("GSE157852")) {
+gse <- getGEO("GSE157852", GSEMatrix = FALSE)
+}
+
+```
+
+GEO description of dataset
+```{r}
+gpl <- names(GPLList(gse))[1] 
+gpl_info <- Meta(getGEO(gpl))
+gpl_info$title
+gpl_info$submission_date
+gpl_info$last_update_date
+gpl_info$organism
+length(gpl_info$series_id)
+length(gpl_info$sample_id)
+```
+__Platform title__: NextSeq 550 (Homo sapiens)\
+__Submission data__: Apr 05 2016\
+__Last update data__: Dec 05 2018\
+__Organims__: Homo sapiens\
+__Number of GEO datasets that use this techology__: 289\
+__Number of GEO samples that use this technology__: 9090\
+
+# Downloading Dataset
+```{r}
+sfiles = getGEOSuppFiles('GSE157852')
+fnames = rownames(sfiles)
+countsdata = read.delim(fnames[1],header = TRUE,check.names = FALSE)
+```
+
+# Cleaning & Filtering Dataset
+How many expressions do we have measurements for?
+```{r}
+countsdata <- read.table("GSE157852/GSE157852_CPO_RawCounts.txt", header=TRUE)
+dim(countsdata)
+```
+    [1] 29755     9
+There is 29755 genes in this dataset. However there is only one column, this is because they have not separated the samples into individual columns. I used read.table() function and set header to TRUE to get all 9 samples.
+
+```{r}
+#renaming Columns to corresponding samples, as well as labeling genes column
+
+countsdata <- cbind(rownames(countsdata), countsdata)
+rownames(countsdata) <- NULL
+colnames(countsdata) <- c( "Genes", "CPO_Mock_72hpi_S1", "CPO_Mock_72hpi_S2", "CPO_Mock_72hpi_S3", "CPO_SARS-CoV-2_24hpi_S4", "CPO_SARS-CoV-2_24hpi_S5", "CPO_SARS-CoV-2_24hpi_S6", "CPO_SARS-CoV-2_72hpi_S7", "CPO_SARS-CoV-2_72hpi_S8", "CPO_SARS-CoV-2_72hpi_S9")
+```
+
+
+__Filter weakly expressed genes from my dataset__
+The paper indicates that n = 3 biological replicates.
+```{r}
+#Translate reads into counts per million using edgeR package
+cpms = edgeR::cpm(countsdata[,2:9])
+rownames(cpms) <- countsdata[ ,1]
+# keep counts greater than 1cpm, n = 3 biological replicates
+keeps = rowSums(cpms >1) >= 3
+filtered_countsdata = countsdata[keeps, ]
+dim(filtered_countsdata)
+```
+[1] 12849    10
+
+16906 counts were removed.
+
+__Check for Duplicates__
+```{r}
+filtered_countsGenes <- data.frame(table(filtered_countsdata$Genes))
+colnames(filtered_countsGenes) <- c("Genes", "Frequency")
+
+sum(filtered_countsGenes$Frequency > 1)
+```
+[1] 0 \ No duplicates found
+
+
+# Visulization 
+
+__Density Plot__ 
+```{r}
+countsDensity <- apply(log2(edgeR::cpm(filtered_countsdata[ ,2:10])), 2, density)
+# 
+xlim <- 0; ylim <- 0
+for (i in 1:length(countsDensity)) {
+ xlim <- range(c(xlim, countsDensity[[i]]$x));
+ ylim <- range(c(ylim, countsDensity[[i]]$y))
+}
+
+# C
+density_cols <- rainbow(length(filtered_countsdata))
+ltys <- rep(1, length(countsDensity))
+
+plot(countsDensity[[1]], xlim=xlim, ylim=ylim, type="n",
+     main=" Pre-Normalized Density Plot")
+for (i in 1:length(countsDensity)){
+  lines(countsDensity[[i]], col=density_cols[i], lty=ltys[i])
+}
+# legend
+legend("topright", colnames(filtered_countsdata)[2:10], col=density_cols, lty=ltys, cex=0.45,
+border ="blue", text.col = "black", merge = TRUE, bg = "gray90")
+```
+
+
+__Original Boxplot without Normalization__
+
+```{r}
+preNormalbox <- log2(cpm(filtered_countsdata[ ,2:10])) 
+
+boxplot(preNormalbox, outline=TRUE, xlab = "Samples", ylab = "log2 CPM",
+las = 2, cex = 0.7, cex.lab = 0.7,
+cex.axis = 0.6, main = "Pre-Normalized Box Plot")
+
+abline(h = median(apply(preNormalbox, 2, median)), col = "red", lwd = 0.6, lty = "dashed")
+```
+
+
+# Apply Normalization
+The paper indicates that raw counts were already normalized in order to make the data comparable. Raw sequencing data from Choroid plexus organoids (CPOs), human choroid plexus tissue and SARS-COV-2 were first TPM normalized (transcripts per million) to obtain TPM values for each transcripts. TPM expression values were then log10(TPM + 1) transformed for plotting individual expression values. 
+
+
+```{r}
+## first define samples and categorize them in their designated reatment
+samples <- data.frame(lapply(colnames(filtered_countsdata)[2:10],
+FUN=function(x){unlist(strsplit(x, split = "_", 3))[c(1,2,3)]}))
+colnames(samples) <- colnames(filtered_countsdata)[2:10]
+rownames(samples) <- c("Tissue","Sample Type", "Condition") #assign the 3 groups
+samples <- data.frame(t(samples))
+```
+
+The method I will use is edgeR's trimmed mean of M values (TMM) normalization method. Because this dataset has already been TPM normalized in order to compare gene count comparisons between samples, TMM normalization is the ideal candidate because it is robust and accounts for library size as well as large differences in Deferentially expressed genes.
+
+```{r echo=TRUE}
+filtered_dataMatrix<- as.matrix(filtered_countsdata[ ,2:10])
+rownames(filtered_dataMatrix) <- filtered_countsdata$Gene
+d = DGEList(counts=filtered_dataMatrix,  group=samples$Condition)
+d = calcNormFactors(d)
+normalized_counts <- cpm(d)
+```
+__Normalized Density Plot__
+```{r}
+normalDensity <- apply(log2(normalized_counts), 2, density)
+xlim <- 0; ylim <- 0
+for (i in 1:length(normalDensity)) {
+ xlim <- range(c(xlim, normalDensity[[i]]$x));
+ ylim <- range(c(ylim, normalDensity[[i]]$y))
+}
+
+cols <- rainbow(length(normalized_counts))
+ltys <- rep(1, length(normalDensity))
+
+plot(normalDensity[[1]], xlim=xlim, ylim=ylim, type="n",
+     main="Normalized Density Plot")
+for (i in 1:length(normalDensity)){
+  lines(normalDensity[[i]], col=cols[i], lty=ltys[i])
+}
+# legend
+legend("topright", colnames(normalized_counts), col=cols, lty=ltys, cex=0.45,
+border ="blue", text.col = "black", merge = TRUE, bg = "gray90")
+```
+There isnt much of a difference between the pre-normalized plot and the normalized plot. I also dont know why its red.
+
+__Normalized Box Plot__
+```{r}
+Normalbox <- log2(normalized_counts)
+
+boxplot(Normalbox, outline=TRUE, xlab = "Samples", ylab = "log2 CPM",
+las = 2, cex = 0.7, cex.lab = 0.7,
+cex.axis = 0.6, main = "Normalized Box Plot")
+
+abline(h = median(apply(Normalbox, 2, median)), col = "red", lwd = 0.6, lty = "dashed")
+```
+Hasnt changed much.
+__MSD Plot__
+```{r}
+edgeR::plotMDS.DGEList(d, labels=colnames(normalized_counts),
+               col=c(rep("red",3),rep("blue",3),rep("purple",3)),
+               main=" Normalized MSD Plot")
+```
+Were we see that the samples of each group cluster together but do not over lap. However it is as expected that organoids treated 24 hours post infection and organoids treated 72 hours post infection have similar gene expression, and 72hpi are more highly expressed.
+__Biological Coefficient of Variation__
+```{r}
+modelDesign <- model.matrix(~samples$Condition)
+d_value <- edgeR::estimateDisp(d, modelDesign)
+edgeR::plotBCV(d_value ,col.tagwise = "black",col.common = "red")
+title("Biological Coefficient of Variation")
+
+```
+This plot represents the mean-varian relationship. The common dispersion line at approx. 0.2 is considered reasonable and could therefore favorably influence our DE gene detection. [3] \
+
+
+
+# Identifier Mapping
+__Mapping to HUGO symbols__
+We want to retrieve both ensembl gene ids, and HUGO symbols. But because the gene names are already defined in HUGO symbols, I only need to map ensembl gene IDs to gene name, then check if they are correct. I will first retrieve the ensembl gene ids and map them to gene names to make sure I have the correct HUGO symbol associated with each identifier. 
+```{r}
+# First mapping to ensembl gene ids
+#get datasets associated with mart I am using then look for hsapiens gene ensembl
+
+humanEnsembl <- useEnsembl(biomart = "ensembl", 
+                  dataset = "hsapiens_gene_ensembl", 
+                  mirror = "useast")
+
+ensemblConversionIDs <- getBM(attributes = c("hgnc_symbol","ensembl_gene_id"),
+                                            filters = c("hgnc_symbol"),
+                                            values = filtered_countsdata$Genes,
+                                            mart = humanEnsembl) 
+
+#adding ensemble ids column to filtered counts table
+colnames(ensemblConversionIDs) <- c("Genes", "ensemblID")
+filtered_countsdata <- merge(ensemblConversionIDs, filtered_countsdata, by="Genes")
+
+
+cat((1-dim(ensemblConversionIDs)[1]/dim(filtered_countsdata)[1])*100, "% unmatched", sep="")
+# this code retrieved from fellow classmate Jack Stanley 
+```
+I have 0% unmatched genes. However I still need to check for duplicates after Ive mapped HUGO symbols to ensembl ID's. 
+
+
+__Checking for Duplicated Ensembl Ids__
+```{r}
+filtered_countsMapped <- data.frame(table(filtered_countsdata$ensemblID))
+colnames(filtered_countsMapped) <- c("EnsemblGene", "Frequency")
+
+sum(filtered_countsMapped$Frequency > 1)
+
+```
+No duplicates found for Ensembl IDs \
+
+Lets look for duplicated HUGO Symbols
+```{r}
+
+filtered_countsHUGO <- data.frame(table(filtered_countsdata$Genes))
+colnames(filtered_countsHUGO) <- c("HUGOSymbols", "Frequency")
+duplicates <- (filtered_countsHUGO$Frequency > 1)
+sum(duplicates)
+
+```
+525 duplicate Hugo Symbols were Identified, so multiple ensembl gene ids have mapped to the same HUGO symbol. Because my filtered dataset is already relatively small, I will solve this problem by assigning unique a suffix for each duplication and keeping the duplicates. (Idea inspired by Micaela Consens).
+```{r}
+filtered_countsdata$Genes <- make.names(filtered_countsdata$Genes, unique=TRUE)
+```
+
+
+
+
+# Interpretations
+
+__What are the control and test conditions of the dataset?__ \
+The controls are the Mock 72hpi (hours post infection) conditions, and the test conditions are 24hpi and 72hpi. \
+__Why is the dataset of interest to you?__ \
+I knew I wanted to choose an experiment involving COVID-19 due to ongoing global pandemic. What fascinated me about this particular dataset are the methods used involving brain organoids to detect susceptibility of different tissues in the brain. \
+__Were there expression values that were not unique for specific genes? How did you handle these?__ \
+There were no genes that were duplicate in the dataset prior to mapping. \
+__Were there expression values that could not be mapped to current HUGO symbols?__ \
+Because this dataset has already defined their genes in terms of HUGO symbols, what ended up happening was after mapping, multiple ensembl gene ids have mapped to the same hugo symbol. \
+__How many outliers were removed?__ \
+During filtering, 16906 read counts were removed, for a total of 12849 read counts. \
+__How did you handle replicates?__ \
+I handled replicates by giving them unique identifiers so as to keep as much data as possible because my dataset is small. \
+__What is the final coverage of your dataset?__ \
+Because I kept all 525 replicates, I still have a final coverage of 12849 read counts after filtering and normalization. \
+
+
+# References: \
+[1] Jacob, Fadi et al. “Human Pluripotent Stem Cell-Derived Neural Cells and Brain Organoids Reveal SARS-CoV-2 Neurotropism Predominates in Choroid Plexus Epithelium.” Cell stem cell vol. 27,6 (2020): 937-950.e9. doi:10.1016/j.stem.2020.09.016 \
+
+[2] BCB420 2021 Course Notes; by Ruth Isserlin \
+
+[3] Interpreting a BCV Plot (https://bioinformatics.cvr.ac.uk/some-key-factors-for-number-of-significant-de-genes)
