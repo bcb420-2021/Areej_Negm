@@ -1,0 +1,428 @@
+---
+title: 'Assignment 2: Differential Gene Expression & Preliminary ORA'
+author: "Areej Negm"
+output:
+  html_document:
+    df_print: paged
+    fig_caption: yes
+    toc: yes
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+---
+
+#Introduction
+
+
+Assignment 1 Recap & Workflow summary for Assignment 2
+In the first assignment, I found an expression dataset that was of interest to me [GSE157852](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE157852): Human Pluripotent Stem Cell-Derived Neural Cells and Brain Organoids Reveal SARS-CoV-2 Neurotropism Predominates in Choroid Plexus Epithelium. With the raw counts provided, I proceeded to clean and filter genes that were weakly expressed (genes with counts less than n = 3) which resulted in 12849 counts. The cleaned data was then normalized using edgeR's Trimmed Means of M-Values (TMM) method and mapped to HUGO and ensembl gene ID's. In this assignment, I will obtain the normalized expression set and calculate p-values for each gene to determine significanlty expressed genes below the p-value threshold of 0.05. The p-values will further be corrected using a multiple hypothesis correction method then visualized with a volcano plot. \\
+The next step is to preform threshold over-representation analysis. \\
+Provided below are the visuals for the normalized expression data and an initial heatmap to better grasp the data before performing differential analysis.
+
+```{r warning=FALSE, message=FALSE}
+if (!requireNamespace("BiocManager", quietly = TRUE))    
+  install.packages("BiocManager")
+
+if (!requireNamespace("Biobase", quietly = TRUE))    
+  install.packages("Biobase")
+
+if (!requireNamespace("GEOmetadb", quietly = TRUE))    
+  BiocManager::install("GEOmetadb")
+
+if (!requireNamespace("biomaRt", quietly = TRUE))
+  BiocManager::install("biomaRt")
+
+if (!requireNamespace("ComplexHeatmap", quietly = TRUE))
+  BiocManager::install("ComplexHeatmap")
+
+if (!requireNamespace("dplyr", quietly = TRUE))
+  install.packages("dplyr")
+
+if (!requireNamespace("edgeR", quietly = TRUE))
+  install.packages("edgeR")
+
+if (!requireNamespace("limma", quietly = TRUE))
+  install.packages("limma")
+
+if (!requireNamespace("ggplot2", quietly = TRUE))
+  install.packages("ggplot2")
+
+if (!requireNamespace("tidyr", quietly = TRUE))
+  install.packages("tidyr")
+
+if (!requireNamespace("circlize", quietly = TRUE))
+  install.packages("circlize")
+
+if (!requireNamespace("knitr", quietly = TRUE))
+  install.packages("knitr")
+
+library("knitr")
+library("Biobase")
+library("limma")
+library("circlize")
+library("ComplexHeatmap")
+library("dplyr")
+```
+
+
+__Preparations:__
+Load cleaned, normalized data
+```{r warning=FALSE, message=FALSE}
+#saveRDS(normalized_counts, file = "normalizedClean_counts.rds") 
+
+normalized_data <- readRDS("normalizedClean_counts.rds")
+```
+
+
+#Visualizaton
+
+
+__Normalized Density Plot__
+
+```{r warning=FALSE}
+normalized <- normalized_data %>% 
+  log2() %>% 
+  as.data.frame() %>% 
+  tidyr::gather(key=sample, value=log_cpm)
+
+# Normalized Density plot 
+ggplot2::ggplot(normalized, ggplot2::aes(x=log_cpm, color=sample)) +
+  ggplot2::geom_density() + ggplot2::labs(title = " Normalized Density Plot") + 
+  ggplot2::theme(legend.position="right")
+
+```
+
+__Normalized Box Plot__
+```{r warning=FALSE, message=FALSE}
+#normalized box plot
+ggplot2::ggplot(normalized, ggplot2::aes(x = sample, y = log_cpm, 
+    color = sample)) + ggplot2::geom_boxplot() + ggplot2::coord_flip() + ggplot2::labs(title = "Normalized Box Plot") + 
+    ggplot2::theme(legend.position = "none")
+```
+
+
+__MSD Plot__
+As we can see from this MSD plot, samples are tightly clustered together based on their conditions. Thus I will proceed with differential expression analysis to account for variations in genes, not just 
+
+```{r}
+#normalized MSD plot
+d <- edgeR::DGEList(counts=normalized_data, 
+                          group=c(rep("green",3),rep("blue",3),rep("purple",3)))
+
+edgeR::plotMDS.DGEList(d, labels=colnames(normalized_data),
+               col=c(rep("green",3),rep("blue",3),rep("purple",3)),
+               main=" Normalized MSD Plot")
+```
+
+__Initial HeatMap of Normalized Dataset__
+```{r warning=FALSE, message=FALSE}
+heatmap_matrix <- t(scale(t(normalized_data)))
+
+if(min(heatmap_matrix) == 0){
+  heatmap_col = circlize::colorRamp2(c(min(heatmap_matrix), 0, max(heatmap_matrix)), c("blue", "white", "red"))
+  } else {
+    heatmap_col = circlize::colorRamp2(c(min(heatmap_matrix), 0, max(heatmap_matrix)), c("blue", "white", "red"))
+  }
+
+#heatmap annotations
+haa <- ComplexHeatmap::HeatmapAnnotation(
+                                   type = anno_block(gp = gpar(fill = 2:4), 
+                                   labels = c("SARS-Cov2-72hpi", "SARS-CoV-2-24hpi", "Mock-72hpi"), 
+                                   labels_gp = gpar(col = "white", fontsize = 10)))
+                                   split = rep(1:3, each = 3)
+
+initial_heatmap <- ComplexHeatmap::Heatmap(as.matrix(heatmap_matrix), 
+                                           show_row_dend = TRUE, 
+                                           show_column_dend = TRUE, 
+                                           col = heatmap_col, 
+                                           show_column_names = TRUE, 
+                                           show_row_names = FALSE, 
+                                           show_heatmap_legend = TRUE,
+                                           column_split = split,
+                                           top_annotation = haa,
+                                           column_title = NULL)
+initial_heatmap
+```
+
+
+#Differential Gene Expression Analysis 
+\\
+
+__Defining Sample Types__
+```{r warning=FALSE, message=FALSE}
+## define samples and categorize them in their designated treatment group
+samples <- data.frame(lapply(colnames(normalized_data),
+FUN=function(x){unlist(strsplit(x, split = "_", 3))[c(2,3)]}))
+colnames(samples) <- colnames(normalized_data)
+rownames(samples) <- c("Type", "Condition") #assign groups
+samples <- data.frame(t(samples))
+samples$treatment <- apply(samples[, 1:2], 1, paste, collapse = "_")
+
+```
+
+#### 1. Calculate p-values for each of the genes in your expression set. How many genes were significantly differentially expressed? What thresholds did you use and why?
+
+To start differential gene expression analysis, I will first create a model matrix which categorizes organoid samples based on the conditions they belong to. \\
+This experiment compared differentially expressed genes from the following groups, Mock-72hpi, SARS-CoV-2-24hpi and SARS-CoV-2-72hpi. Using the limma method, I first calculated a simple analysis which only took into account the types of the sample, whether it belongs to the vehicle control (Mock) or the SARS-CoV-2 group. I then performed another analysis that takes into account the differences between the SARS-CoV-2 groups, whether it is 24hpi (hours post infection) or 72hpi, which yeilded much better results that passed the p-value threshold of 0.05. 4
+
+__Multiple Hypothesis Testing__
+
+#### 2. Multiple hypothesis testing - correct your p-values using multiple hypothesis correction methods. Which method did you use? And Why? How many genes passed correction? 
+
+The adjustment method I used to correct for multiple hypothesis testing is the Benjamini-Hochberg method, as discussed in lecture, this method is a powerful tool which adjusts p-values to decrease false discovery rates (FDR). 463 genes passed the p-value threshold of 0.05 and 2600 passed the adjusted p-value threshold. 
+
+#Differential Expression Analysis: Limma method
+```{r warning=FALSE, message=FALSE}
+library("limma")
+# Simple Limma analysis for sample type
+ model_type <- model.matrix(~ samples$Type)
+
+ expressionMatrix <- as.matrix(normalized_data)
+ minimalSet <- ExpressionSet(assayData=expressionMatrix)
+
+ fit <- limma::lmFit(minimalSet, model_type) #Fit our data to the above model
+
+ fit2 <- limma::eBayes(fit,trend=TRUE)      # Apply Empirical Bayes to compute Differential Expression
+
+ topfit <- limma::topTable(fit2,            # Multiple Hypothesis Testing using BH
+                   coef=ncol(model_type),
+                   adjust.method = "BH",
+                  number = nrow(expressionMatrix))
+
+ output_hits <- topfit[order(topfit$P.Value),]
+# #Results
+ length(which(output_hits$P.Value < 0.05))   # 3811
+ length(which(output_hits$adj.P.Val < 0.05)) # 1920
+
+
+# Complex Limma analysis for sample type + condition
+ model <- model.matrix(~ samples$treatment)
+
+ expressionMatrix <- as.matrix(normalized_data)
+ minimalSet <- ExpressionSet(assayData=expressionMatrix)
+
+ fit <- lmFit(minimalSet, model) #Fit our data to the above model
+ fit2 <- eBayes(fit,trend=TRUE)            # Apply Empirical Bayes to compute Differential Expression
+ topfit <- topTable(fit2,                  # Multiple Hypothesis Testing using BH
+                    coef=ncol(model),
+                    adjust.method = "BH",
+                    number = nrow(expressionMatrix))
+
+ output_hits <- topfit[order(topfit$P.Value),]
+# #Results
+ length(which(output_hits$P.Value < 0.05))   # 4463
+ length(which(output_hits$adj.P.Val < 0.05)) # 2600
+```
+
+
+#Differential Expression Analysis: Quasi Liklihood method
+
+
+
+Further I will be using edgeR's quasi likelihood model because my data is a bulk RNASeq dataset. This model is most commonly used for bulk RNAseq datasets as it allows for greater variablility and overdispersion in the data. With this method, I can further specify which significanly expressed genes belongs to the SARS.CoV.2-24hpi or the SARS.CoV.2-72hpi treatment groups. For the SARS.CoV.2-24hpi group, 2508 genes passed the p-value threshold and 1184 genes passed correction. For the SARS.CoV.2-72hpi group, 2477 genes passed p-value threshold, and 1340 genes passed correction.
+```{r warning=FALSE, message=FALSE}
+# Setting up edgeR object 
+library(edgeR)
+dge <- edgeR::DGEList(counts=normalized_data, group=samples$treatment)
+disp <- edgeR::estimateDisp(dge, model) # Estimate Dispersion
+fit <- edgeR::glmQLFit(disp, model) # Fit the model
+
+# Calculate Differential Expression for each group
+
+#Differentially expressed genes in the SARS.CoV.2_24hpi group
+qlf.Cov24hpi <- glmQLFTest(fit, coef='samples$treatmentSARS.CoV.2_24hpi')
+kable(topTags(qlf.Cov24hpi), type="html",digits = 32)
+Cov24hpifOutputHits <- topTags(qlf.Cov24hpi,sort.by = "PValue", n = nrow(normalized_data))
+
+#How many genes passed threshold p-value < 0.05?
+length(which(Cov24hpifOutputHits$table$PValue < 0.05)) #2508
+length(which(Cov24hpifOutputHits$table$FDR < 0.05)) # 1184
+
+
+
+#Differentially expressed genes in the SARS.CoV.2_72hpi group
+qlf.Cov72hpi <- glmQLFTest(fit, coef='samples$treatmentSARS.CoV.2_72hpi')
+kable(topTags(qlf.Cov72hpi), type="html",digits = 32)
+
+Cov72hpiOutputHits <- topTags(qlf.Cov72hpi,sort.by = "PValue", n = nrow(normalized_data))
+
+#How many genes passed threshold p-value < 0.05?
+length(which(Cov72hpiOutputHits$table$PValue < 0.05)) #2477
+length(which(Cov72hpiOutputHits$table$FDR < 0.05)) #1340
+
+```
+
+
+#Limma vs. Quasi
+Based on these two analysis methods, I will stick with edgeR's quasi- likelihood analysis because the data presented is binomially distributed, and this method is highly recommended for bulk RNASeq datasets. \\
+
+
+#Show the amount of differentially expressed genes using a Volcano plot
+__Volcano Plots__ 
+```{r warning=FALSE, message=FALSE}
+par(mfrow=c(1,2), xpd=TRUE)
+
+# volcano plot for SARS.CoV.2_24hpi
+vol24hpi <- cbind(Cov24hpifOutputHits$table$logFC, -log10(Cov24hpifOutputHits$table$PValue))
+colnames(vol24hpi) <- c("logFC", "P-value")
+upregulated24hpi <- Cov24hpifOutputHits$table$PValue < 0.05 & Cov24hpifOutputHits$table$logFC > 0
+downregulated24hpi <- Cov24hpifOutputHits$table$PValue < 0.05 & Cov24hpifOutputHits$table$logFC < 0
+
+point.col = case_when(upregulated24hpi ~ "red",downregulated24hpi ~ "blue",TRUE ~ "black")
+plot(vol24hpi, col = point.col,main="SARS-CoV2-24hpi Genes of Interest", cex.main=1, xlim = c(-3,5), ylim = c(0, 11))
+legend("topright", legend=c("Upregulated", "Downregulated"), col=c("red", "blue"), pch=0.1, pt.cex = 1, cex=0.65)
+
+
+
+# volcano plot for SARS.CoV.2_72hpi 
+vol72hpi <- cbind(Cov72hpiOutputHits$table$logFC, -log10(Cov72hpiOutputHits$table$PValue))
+colnames(vol72hpi) <- c("logFC", "P-value")
+upregulated72hpi <- Cov72hpiOutputHits$table$PValue < 0.05 & Cov72hpiOutputHits$table$logFC > 0
+downregulated72hpi <- Cov72hpiOutputHits$table$PValue < 0.05 & Cov72hpiOutputHits$table$logFC < 0
+
+point.col = case_when(upregulated72hpi ~ "red",downregulated72hpi ~ "blue",TRUE ~ "black")
+plot(vol72hpi, col = point.col,main="SARS-CoV2-72hpi Genes of Interest", cex.main=1, xlim = c(-3,5), ylim = c(0, 11))
+legend("topright", legend=c("Upregulated", "Downregulated"), col=c("red", "blue"), pch=0.1, pt.cex = 1, cex=0.65)
+```
+
+
+##Visualize your top hits using a heatmap. Do you conditions cluster together? Explain why or why not.
+__HeatMap__
+```{r warning=FALSE, message=FALSE}
+heatmapMatrix <- t(scale(t(normalized_data)))
+
+top_hits24hpi <- rownames(Cov24hpifOutputHits$table)[Cov24hpifOutputHits$table$PValue<0.05] 
+top_hits72hpi <- rownames(Cov72hpiOutputHits$table)[Cov72hpiOutputHits$table$PValue<0.05]
+
+#select top hits from both groups
+heatmap_matrix_tophits <- t(scale(t(heatmapMatrix[which(rownames(heatmapMatrix) %in% top_hits24hpi 
+                                                      | rownames(heatmapMatrix) %in% top_hits72hpi),]))) 
+
+if(min(heatmap_matrix_tophits) == 0){
+  heatmapCol = circlize::colorRamp2(c(min(heatmap_matrix_tophits), 0, max(heatmap_matrix_tophits)), 
+                                  c("blue", "white", "red"))
+  } else {
+    heatmapCol = circlize::colorRamp2(c(min(heatmap_matrix_tophits), 0, max(heatmap_matrix_tophits)), 
+                                      c("blue", "white", "red"))
+  }
+
+#heatmap annotations
+ha <- ComplexHeatmap::HeatmapAnnotation(
+                                   type = anno_block(gp = gpar(fill = 2:4), 
+                                   labels = c("Mock-72hpi", "SARS-CoV-2-24hpi", "SARS-Cov2-72hpi"), 
+                                   labels_gp = gpar(col = "white", fontsize = 10)))
+                                   split = rep(1:3, each = 3)
+
+heatmap <- ComplexHeatmap::Heatmap(as.matrix(heatmap_matrix_tophits), 
+                                   cluster_rows = TRUE,
+                                   cluster_columns = FALSE,
+                                   show_row_dend = TRUE, 
+                                   show_column_dend = FALSE, 
+                                   col = heatmapCol, 
+                                   show_column_names = TRUE, 
+                                   show_row_names = FALSE, 
+                                   show_heatmap_legend = TRUE,
+                                   column_split = split,
+                                   top_annotation = ha,
+                                   column_title = NULL)
+heatmap
+```
+After performing differential analysis, and ignoring the Mock-72hpi, I can see that there is definitly some clustering going on with the SARS-CoV-2-24hpi and SARS-CoV-2-72hpi, especially in the SARS-CoV-2-72hpi group which would make sense because 72hpi would yield more differentially expressed genes then 24hpi would.
+
+
+# Thresholded Analysis
+In order to perform over-representation analysis, we must first obtain all the significantly expressed genes with the threshold p-value of 0.05.
+
+#### 1. Which method did you choose and why?
+I used the quasi-likelihood results of differential expression analysis, reason is discussed above.
+
+#### 2. What annotation data did you use and why? What version of the annotation are you using?
+The annotation dataset I chose is g:profiler, this tool is widley used in bioinformatics because it provides high quality and continuously updated data. 
+
+#### 3. How many genesets were returned with what thresholds?
+The study indicates that there were similar gene expression changes between SARS-CoV2-24hpi and SARS-CoV2-72hpi, so for the sake of simplicity, I have only run the SARS-CoV2-72hpi upregulated and downregulated genes, as there are more significantly expressed genes 72 hours post infection as expected. 
+
+
+#### 4. Run the analysis using the up-regulated set of genes, and the down-regulated set of genes separately. How do these results compare to using the whole list (i.e all differentially expressed genes together vs. the up-regulated and down regulated differentially expressed genes separately)?
+
+```{r warning=FALSE, message=FALSE}
+#export upregulated gene tables
+upregulated_genes24hpi <- rownames(Cov24hpifOutputHits)[Cov24hpifOutputHits$table$PValue < 0.05 & 
+                                                     Cov24hpifOutputHits$table$logFC > 0]
+write.table(x=upregulated_genes24hpi,file=file.path("upregulated_genes24hpi.txt"),sep = "\t", 
+            row.names = FALSE,col.names = FALSE,quote = FALSE)
+
+upregulated_genes72hpi <-  rownames(Cov72hpiOutputHits)[Cov72hpiOutputHits$table$PValue < 0.05 & 
+                                                     Cov72hpiOutputHits$table$logFC > 0]
+write.table(x=upregulated_genes72hpi,file=file.path("upregulated_genes72hpi.txt"),sep = "\t", 
+            row.names = FALSE,col.names = FALSE,quote = FALSE)  
+
+#export downregulated gene tables
+downregulated_genes24hpi <- rownames(Cov24hpifOutputHits$table)[Cov24hpifOutputHits$table$PValue < 0.05 & 
+                                                             Cov24hpifOutputHits$table$logFC < 0] 
+write.table(x=downregulated_genes24hpi,file=file.path("downregulated_genes24hpi.txt"),sep = "\t", 
+            row.names = FALSE,col.names = FALSE,quote = FALSE)
+
+downregulated_genes72hpi <- rownames(Cov72hpiOutputHits$table)[Cov72hpiOutputHits$table$PValue < 0.05 & 
+                                                             Cov72hpiOutputHits$table$logFC < 0] 
+write.table(x=downregulated_genes72hpi,file=file.path("downregulated_genes72hpi.txt"),sep = "\t", 
+            row.names = FALSE,col.names = FALSE,quote = FALSE) 
+```
+
+
+
+![Figure 1: Annotation Results for Upregulated Genes 72hpi](images/resultsup72hpi.png)
+Upregulated72hpi- genesets with BH FDR threshold of 0.05
+GO: BP-  2,590 \\
+    MF- 193 \\
+REAC: 228 \\
+WP: 15  \\
+
+
+![Figure 2: GO Biological Pathways for Upregulated Genes 72hpi](images/upregulated72hpi.png)
+
+![Figure 3: Annotation Results for Downregulated Genes 72hpi](images/resultsdown72hpi.png)
+Downregulated72hpi- genesets with BH FDR threshold of 0.05
+GO: BP-  703 \\
+    MF- 179 \\
+REAC: 5  \\
+WP: 1  \\
+![Figure 4: GO Biological Pathways for Downregulated Genes 72hpi](images/downregulated72hpi.png)
+
+# Interpretation
+
+#### 1. Do the over-representation results support conclusions or mechanism discussed in the original paper?
+The over-representation results significantly supports the discussions in the original paper. More specifically, upregulated genes at 72hpi reveals an increase in expression among genes related to viral responses, RNA processing, response to cytokine, and cell death which is hypothesized to contribute to more severe inflammation responses in the brain.
+Further, downregulated genes at 72hpi revealed that there was a decreased expression of genes related to many transporters, ion channels, and cell junctions, which is quite evident in my figure 4 above. Furthermore, significant downregulation of TTR production further contributes to neuropsychiatric symptoms and “brain fog” in patients. [2][4]
+
+
+#### 2. Can you find evidence, i.e. publications, to support some of the results that you see. How does this evidence support your results.
+This study provides an in depth analysis of their differential gene expression with evidence from a variety of publications that supported their results. I found this to be very fascinating and also exciting that my data also corresponds to their findings. 
+
+# References
+1. BCB420 2021 Course Notes; by Ruth Isserlin
+
+2. Jacob, F., Pather, S. R., Huang, W. K., Zhang, F., Wong, S., Zhou, H., Cubitt, B., Fan, W., Chen, C. Z., Xu, M., Pradhan, M., Zhang, D. Y., Zheng, W., Bang, A. G., Song, H., Carlos de la Torre, J., & Ming, G. L. (2020). Human Pluripotent Stem Cell-Derived Neural Cells and Brain Organoids Reveal SARS-CoV-2 Neurotropism Predominates in Choroid Plexus Epithelium. Cell stem cell, 27(6), 937–950.e9. https://doi.org/10.1016/j.stem.2020.09.016
+
+3. https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE157852 
+
+4. Samuels M.H. Psychiatric and cognitive manifestations of hypothyroidism. Curr. Opin. Endocrinol. Diabetes Obes. 2014;21:377–383. 
+
+# Packages Used
+1.  Martin Morgan (2019). BiocManager: Access the Bioconductor Project Package Repository. R package version 1.30.10. https://CRAN.R-project.org/package=BiocManager \\
+2.  Zhu Y, Davis S, Stephens R, Meltzer PS, Chen Y. GEOmetadb: powerful alternative search engine for the Gene Expression Omnibus.   Bioinformatics. 2008 Dec\\
+    1;24(23):2798-800. doi: 10.1093/bioinformatics/btn520. Epub 2008 Oct 7. PubMed PMID: 18842599; PubMed Central PMCID: PMC2639278.
+3.  Gu, Z. (2016) Complex heatmaps reveal patterns and correlations in multidimensional genomic data. Bioinformatics.\\
+4.  Hadley Wickham, Romain François, Lionel Henry and Kirill Müller (2021). dplyr: A Grammar of Data Manipulation. R package version 1.0.5.
+    https://CRAN.R-project.org/package=dplyr\\
+5.  Robinson MD, McCarthy DJ and Smyth GK (2010). edgeR: a Bioconductor package for differential expression analysis of digital gene expression data. Bioinformatics 26, 139-140 \\
+6.  Ritchie, M.E., Phipson, B., Wu, D., Hu, Y., Law, C.W., Shi, W., and Smyth, G.K. (2015). limma powers differential expression analyses for RNA-sequencing and microarray studies. Nucleic Acids Research 43(7), e47. \\
+7.  H. Wickham. ggplot2: Elegant Graphics for Data Analysis. Springer-Verlag New York, 2016.\\
+8.  Hadley Wickham (2021). tidyr: Tidy Messy Data. R package version 1.1.3. https://CRAN.R-project.org/package=tidyr \\
+9.  Gu, Z. (2014) circlize implements and enhances circular visualization in R. Bioinformatics.\\
+10. Yihui Xie (2021). knitr: A General-Purpose Package for Dynamic Report Generation in R. R package version 1.31. \\
+11. Liis Kolberg and Uku Raudvere (2020). gprofiler2: Interface to the 'g:Profiler' Toolset. R package version 0.2.0.  https://CRAN.R-project.org/package=gprofiler2 \\
+
+
+
+
